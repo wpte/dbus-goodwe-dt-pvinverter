@@ -72,231 +72,233 @@ class VictronDbusService():
       return dbus_service
 
 class GoodWeEMService:
-  """ GoodWe Inverter and SmartMeter class
-  """
-  def __init__(self, product_name='GoodWe EM', connection='GoodWe EM service'):
-    """Creates a GoodWeEMService object to interact with GoodWe Inverter and SmartMeter, 
-    it also handles configuration management and Dbus updates
-
-    Args:
-        product_name (str, optional): _description_. Defaults to 'GoodWe EM'.
-        connection (str, optional): _description_. Defaults to 'GoodWe EM service'.
+    """ GoodWe Inverter and SmartMeter class
     """
-    config = self._get_config()
+    def __init__(self, product_name='GoodWe EM', connection='GoodWe EM service'):
+        """Creates a GoodWeEMService object to interact with GoodWe Inverter and SmartMeter, 
+        it also handles configuration management and Dbus updates
 
-    self.dbus_service = None
-    self.custom_name = config['DEFAULT']['CustomName']
-    self.product_name = product_name
-    self.product_id = 0xFFFF
-    self.logical_connection = connection
-    self.device_instance = int(config['DEFAULT']['DeviceInstance'])
-    self.has_meter = bool(config['ONPREMISE']['HasMeter'])
-    self.pv_inverter_position = int(config['ONPREMISE']['Position'])
-    self.pv_max_power = int(config['ONPREMISE']['MaxPower'])
-    self.pv_host = config['ONPREMISE']['Host']
+        Args:
+            product_name (str, optional): _description_. Defaults to 'GoodWe EM'.
+            connection (str, optional): _description_. Defaults to 'GoodWe EM service'.
+        """
+        config = self._get_config()
 
-    if self.has_meter:
-      self.meter_product_name = config['SMARTMETER']['ProductName']
+        self.dbus_service = None
+        self.custom_name = config['DEFAULT']['CustomName']
+        self.product_name = product_name
+        self.product_id = 0xFFFF
+        self.logical_connection = connection
+        self.device_instance = int(config['DEFAULT']['DeviceInstance'])
+        self.has_meter = bool(config['ONPREMISE']['HasMeter'])
+        self.pv_inverter_position = int(config['ONPREMISE']['Position'])
+        self.pv_max_power = int(config['ONPREMISE']['MaxPower'])
+        self.pv_host = config['ONPREMISE']['Host']
 
-    #formatting 
-    self._kwh = lambda p, v: (str(round(v, 2)) + 'KWh')
-    self._a = lambda p, v: (str(round(v, 1)) + 'A')
-    self._w = lambda p, v: (str(round(v, 1)) + 'W')
-    self._v = lambda p, v: (str(round(v, 1)) + 'V') 
+        if self.has_meter:
+            self.meter_product_name = config['SMARTMETER']['ProductName']
 
-    logging.debug("%s /DeviceInstance = %d" % (self.custom_name, self.device_instance))
+        # Initialize attributes
+        self.pv_power = 0
+        self.pv_current = 0
+        self.e_total = 0
+        self.pv_voltage = 0
+        self.vgrid1 = 0
+        self.vgrid2 = 0
+        self.vgrid3 = 0
+        self.igrid1 = 0
+        self.igrid2 = 0
+        self.igrid3 = 0
+        self.pgrid1 = 0
+        self.pgrid2 = 0
+        self.pgrid3 = 0
+        self.total_inverter_power = 0
+        self.work_mode = 0
 
-  def set_dbus_service(self, dbus_service):
-    self.dbus_service = dbus_service
+        #formatting 
+        self._kwh = lambda p, v: (str(round(v, 2)) + 'KWh')
+        self._a = lambda p, v: (str(round(v, 1)) + 'A')
+        self._w = lambda p, v: (str(round(v, 1)) + 'W')
+        self._v = lambda p, v: (str(round(v, 1)) + 'V') 
 
-  def _get_config(self):
-    config = configparser.ConfigParser()
-    config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
-    return config
+        logging.debug("%s /DeviceInstance = %d" % (self.custom_name, self.device_instance))
 
-  async def _get_goodwe_data(self, host):
-    # ToDo: Read sensor data unit
-    inverter = await goodwe.connect(host)
-    meter_data = await inverter.read_runtime_data()
-    
-    # check for response
-    if not meter_data:
-        raise ConnectionError("No response from GoodWe EM - %s" % (host))
-    
-    return meter_data
- 
-  def _get_goodwe_serial(self):
-    # Dummy function to retrieve a "serial" identifier, using custom name for now
-    config = self._get_config()
-    return config['DEFAULT']['CustomName']
+    def set_dbus_service(self, dbus_service):
+        self.dbus_service = dbus_service
 
-  def refresh_meter_data(self):   
-    try:
+    def _get_config(self):
+        config = configparser.ConfigParser()
+        config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
+        return config
 
-      #get data from GoodWe EM through Goodwe python library in async
-      meter_data = asyncio.run(self._get_goodwe_data(self.pv_host))       
-      
-      # ppv = for photo voltaic voltage
-      self.pv_power = meter_data['ppv']
-      # igrid current ac on grid (not differentiated by the meter)
-      self.pv_current = meter_data['igrid']
-      # total power equals power as GoodWe gives us the aggregatted ammount
-      self.pv_total = meter_data['e_total']
-      # total voltage on AC line (not differentiated by the meter)
-      self.pv_voltage = meter_data['vgrid']
+    async def _get_goodwe_data(self, host):
+        # ToDo: Read sensor data unit
+        inverter = await goodwe.connect(host)
+        meter_data = await inverter.read_runtime_data()
+        
+        # check for response
+        if not meter_data:
+            raise ConnectionError("No response from GoodWe EM - %s" % (host))
+        
+        return meter_data
 
-      # Only if we have a smart meter setted up, almost all the values are the same with the exception of house_consumption
-      if self.has_meter:
-        # ToDo: review and fix -abs, we're negative abs as Victron expects negative values on export
-        self.meter_forward = meter_data['pgrid'] * -1
-        # reverse is "sold to the grid"
-        self.meter_reverse = (meter_data['pgrid'] * -1) - meter_data['house_consumption'] # sold to the grid
-        # house consumption is total AC load
-        self.meter_house_consumption = meter_data['house_consumption']
-        # igrid = AC current, not differentiated by the smart meter
-        self.meter_current = meter_data['igrid']
-        self.meter_power = meter_data['pgrid'] * -1
-        self.meter_voltage = meter_data['vgrid']
+    def refresh_meter_data(self):   
+        try:
+            #get data from GoodWe EM through Goodwe python library in async
+            meter_data = asyncio.run(self._get_goodwe_data(self.pv_host))       
+            
+            # ppv = for photo voltaic voltage
+            self.pv_power = meter_data.get('ppv', 0)
+            # igrid current ac on grid (not differentiated by the meter)
+            self.pv_current = meter_data.get('igrid', 0)
+            # total power equals power as GoodWe gives us the aggregatted ammount
+            self.e_total = meter_data.get('e_total', 0)
+            # total voltage on AC line (not differentiated by the meter)
+            self.pv_voltage = meter_data.get('vgrid', 0)
 
-    except Exception as e:
-      logging.critical('Error at %s', '_update', exc_info=e)
-       
-    return True
- 
-  def update_dbus_pv_inverter(self):
-    """_summary_
-    updates dbus as a callback function, dbus is setted on the GoodWe EM Class
-    Returns:
-        _type_: _description_
-    """
-    dbus_service = self.dbus_service
-    try:
-      self.refresh_meter_data()
-      pre = '/Ac/L1'
-      #current = power / voltage
-      dbus_service['pvinverter'][pre + '/Voltage'] = self.pv_voltage
-      dbus_service['pvinverter'][pre + '/Current'] = self.pv_current
-      dbus_service['pvinverter'][pre + '/Power'] = self.pv_power
-      if self.pv_power > 0:
-        dbus_service['pvinverter'][pre + '/Energy/Forward'] = self.pv_total # already in kWh
-      else:
-        dbus_service['pvinverter'][pre + '/Voltage'] = 0
-        dbus_service['pvinverter'][pre + '/Current'] = 0
-        dbus_service['pvinverter'][pre + '/Power'] = 0
-        dbus_service['pvinverter'][pre + '/Energy/Forward'] = 0
-          
-      dbus_service['pvinverter']['/Ac/Power'] = dbus_service['pvinverter']['/Ac/L1/Power']
-      dbus_service['pvinverter']['/Ac/Current'] = dbus_service['pvinverter']['/Ac/L1/Current']
-      dbus_service['pvinverter']['/Ac/Energy/Forward'] = dbus_service['pvinverter']['/Ac/L1/Energy/Forward']
-      
-      # update grid meter only if it's configured
-      if self.has_meter:
-        if 'grid' in dbus_service:
-          logging.debug("Updating meter values")
-          pre = '/Ac/L1'
-          #current = power / voltage
-          dbus_service['grid'][pre + '/Voltage'] = self.meter_voltage
-          dbus_service['grid'][pre + '/Current'] = self.meter_current
-          dbus_service['grid'][pre + '/Power'] = self.meter_power
-          
-          # converting watts to kWh, sample 1 minute as required by forward and reverse
-          dbus_service['grid']['/Ac/Energy/Forward'] = self.meter_forward / 1000 / 60
-          dbus_service['grid']['/Ac/Energy/Reverse'] = self.meter_reverse / 1000 / 60
-          dbus_service['grid']['/Ac/L1/Energy/Forward'] = self.meter_forward / 1000 / 60
-          dbus_service['grid']['/Ac/L1/Energy/Reverse'] = self.meter_reverse / 1000 / 60
-          dbus_service['grid']['/Ac/Power'] = self.meter_power          
+            # 3-phase specific data
+            self.vgrid1 = meter_data.get('vgrid1', 0)
+            self.vgrid2 = meter_data.get('vgrid2', 0)
+            self.vgrid3 = meter_data.get('vgrid3', 0)
+            self.igrid1 = meter_data.get('igrid1', 0)
+            self.igrid2 = meter_data.get('igrid2', 0)
+            self.igrid3 = meter_data.get('igrid3', 0)
+            self.pgrid1 = meter_data.get('pgrid1', 0)
+            self.pgrid2 = meter_data.get('pgrid2', 0)
+            self.pgrid3 = meter_data.get('pgrid3', 0)
+            self.total_inverter_power = meter_data.get('total_inverter_power', 0)
+            self.work_mode = meter_data.get('work_mode', 0)
 
-      #logging
-      logging.debug("House Consumption (/Ac/Power): %s" % (dbus_service['pvinverter']['/Ac/Power']))
-      logging.debug("House Forward (/Ac/Energy/Forward): %s" % (dbus_service['pvinverter']['/Ac/Energy/Forward']))
-      logging.debug("---")
-      
-      # increment UpdateIndex - to show that new data is available
-      index = dbus_service['pvinverter']['/UpdateIndex'] + 1  # increment index
-      if index > 255:   # maximum value of the index
-        index = 0       # overflow from 255 to 0
-      dbus_service['pvinverter']['/UpdateIndex'] = index
+        except Exception as e:
+            logging.critical('Error at %s', '_update', exc_info=e)
+        
+        return True
 
-      #update lastupdate vars
-      self._dbus_last_update = time.time()    
-    except Exception as e:
-      logging.critical('Error at %s', '_update', exc_info=e)
+    def map_work_mode_to_status_code(self, work_mode):
+        """Maps GoodWe work mode to Victron status code"""
+        mapping = {
+            0: 8,  # Wait Mode -> Standby
+            1: 7,  # Normal (On-Grid) -> Running
+            2: 7,  # Normal (Off-Grid) -> Running
+            3: 10, # Fault Mode -> Error
+            4: 9,  # Flash Mode -> Boot loading
+            5: 0   # Check Mode -> Startup 0
+        }
+        return mapping.get(work_mode, 0)  # Default to Startup 0 if not found
 
-    return True
+    def update_dbus_pv_inverter(self):
+        """_summary_
+        updates dbus as a callback function, dbus is setted on the GoodWe EM Class
+        Returns:
+            _type_: _description_
+        """
+        dbus_service = self.dbus_service
+        try:
+            self.refresh_meter_data()
+            # Update L1
+            dbus_service['pvinverter']['/Ac/L1/Voltage'] = self.vgrid2
+            dbus_service['pvinverter']['/Ac/L1/Current'] = self.igrid2
+            dbus_service['pvinverter']['/Ac/L1/Power'] = self.pgrid2
+            dbus_service['pvinverter']['/Ac/L1/Energy/Forward'] = self.e_total / 3
+            # Update L2
+            dbus_service['pvinverter']['/Ac/L2/Voltage'] = self.vgrid3
+            dbus_service['pvinverter']['/Ac/L2/Current'] = self.igrid3
+            dbus_service['pvinverter']['/Ac/L2/Power'] = self.pgrid3
+            dbus_service['pvinverter']['/Ac/L2/Energy/Forward'] = self.e_total / 3
+            # Update L3
+            dbus_service['pvinverter']['/Ac/L3/Voltage'] = self.vgrid1
+            dbus_service['pvinverter']['/Ac/L3/Current'] = self.igrid1
+            dbus_service['pvinverter']['/Ac/L3/Power'] = self.pgrid1
+            dbus_service['pvinverter']['/Ac/L3/Energy/Forward'] = self.e_total / 3
+
+            # Update total values
+            dbus_service['pvinverter']['/Ac/Power'] = self.total_inverter_power
+            dbus_service['pvinverter']['/Ac/Energy/Forward'] = self.e_total
+
+            # Update status based on work_mode
+            dbus_service['pvinverter']['/StatusCode'] = self.map_work_mode_to_status_code(self.work_mode)
+
+            #logging
+            logging.debug("House Consumption (/Ac/Power): %s" % (dbus_service['pvinverter']['/Ac/Power']))
+            logging.debug("House Forward (/Ac/Energy/Forward): %s" % (dbus_service['pvinverter']['/Ac/Energy/Forward']))
+            logging.debug("---")
+            
+            # increment UpdateIndex - to show that new data is available
+            index = dbus_service['pvinverter']['/UpdateIndex'] + 1  # increment index
+            if index > 255:   # maximum value of the index
+                index = 0       # overflow from 255 to 0
+            dbus_service['pvinverter']['/UpdateIndex'] = index
+
+            #update lastupdate vars
+            self._dbus_last_update = time.time()    
+        except Exception as e:
+            logging.critical('Error at %s', '_update', exc_info=e)
+
+        return True
 
 def main():
-  #configure logging
-  logging.basicConfig(      format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
-                            datefmt='%Y-%m-%d %H:%M:%S',
-                            level=logging.INFO,
-                            handlers=[
-                               	logging.FileHandler("%s/current.log" % (os.path.dirname(os.path.realpath(__file__)))),
-                               	logging.StreamHandler()
-                            ])
+    #configure logging
+    logging.basicConfig(      format='%(asctime)s,%(msecs)d %(name)s %(levellevel)s %(message)s',
+                              datefmt='%Y-%m-%d %H:%M:%S',
+                              level=logging.INFO,
+                              handlers=[
+                                  logging.FileHandler("%s/current.log" % (os.path.dirname(os.path.realpath(__file__)))),
+                                  logging.StreamHandler()
+                              ])
 
-  logging.info("Start")
+    logging.info("Start")
 
-  from dbus.mainloop.glib import DBusGMainLoop
-  # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
-  DBusGMainLoop(set_as_default=True)
+    from dbus.mainloop.glib import DBusGMainLoop
+    # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
+    DBusGMainLoop(set_as_default=True)
+    
+    goodwe_inverter = GoodWeEMService()
+    victron_dbus = VictronDbusService()
+
+    try:
+        # Dictionary to hold the multiple services as we have two dbus but only one outgoing http connection
+        dbusservice = {} # 
   
-  goodwe_inverter = GoodWeEMService()
-  victron_dbus = VictronDbusService()
+        # Base dbus path
+        base = 'com.victronenergy'
 
-  try:
-
-      # Dictonary to hold the multiple services as we have two dbus but only one outgoing http connection
-      dbusservice = {} # 
- 
-      # Base dbus path
-      base = 'com.victronenergy'
-
-      # creating new dbus service on pvinverter path
-      dbusservice['pvinverter'] = victron_dbus.create_dbus_service(base, 'http', goodwe_inverter.logical_connection, 
-      goodwe_inverter.device_instance, instance=goodwe_inverter.device_instance, product_id=goodwe_inverter.product_id,
-      product_name=goodwe_inverter.product_name, custom_name=goodwe_inverter.custom_name, type="pvinverter"  )
-
-      # add paths specific to pv inverter
-      dbusservice['pvinverter'].add_path('/Ac/Energy/Forward', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
-      dbusservice['pvinverter'].add_path('/Ac/Power', 0, writeable=True, gettextcallback = goodwe_inverter._w)
-      dbusservice['pvinverter'].add_path('/Ac/Current', 0, writeable=True, gettextcallback = goodwe_inverter._a)
-      dbusservice['pvinverter'].add_path('/Ac/Voltage', 0, writeable=True, gettextcallback = goodwe_inverter._v)
-      dbusservice['pvinverter'].add_path('/Ac/L1/Voltage', 0, writeable=True, gettextcallback = goodwe_inverter._v)
-      dbusservice['pvinverter'].add_path('/Ac/L1/Current', 0, writeable=True, gettextcallback = goodwe_inverter._a)
-      dbusservice['pvinverter'].add_path('/Ac/L1/Power', 0, writeable=True, gettextcallback = goodwe_inverter._w)
-      dbusservice['pvinverter'].add_path('/Ac/L1/Energy/Forward', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
-      # Position is required to establish on which line the inverter sits (AC OUT, In, ETC)
-      dbusservice['pvinverter'].add_path('/Position', goodwe_inverter.pv_inverter_position, writeable=True)
-      dbusservice['pvinverter'].add_path('/MaxPower', goodwe_inverter.pv_max_power, writeable=True)
-
-      # create service for grid meter
-      if goodwe_inverter.has_meter:
-        dbusservice['grid'] = victron_dbus.create_dbus_service(base, 'http', goodwe_inverter.logical_connection, 
+        # creating new dbus service on pvinverter path
+        dbusservice['pvinverter'] = victron_dbus.create_dbus_service(base, 'http', goodwe_inverter.logical_connection, 
         goodwe_inverter.device_instance, instance=goodwe_inverter.device_instance, product_id=goodwe_inverter.product_id,
-        product_name=goodwe_inverter.meter_product_name, custom_name=goodwe_inverter.meter_product_name, type="grid"  )
+        product_name=goodwe_inverter.product_name, custom_name=goodwe_inverter.custom_name, type="pvinverter"  )
 
+        # add paths specific to pv inverter
+        dbusservice['pvinverter'].add_path('/Ac/Energy/Forward', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
+        dbusservice['pvinverter'].add_path('/Ac/Power', 0, writeable=True, gettextcallback = goodwe_inverter._w)
+        dbusservice['pvinverter'].add_path('/Ac/Current', 0, writeable=True, gettextcallback = goodwe_inverter._a)
+        dbusservice['pvinverter'].add_path('/Ac/Voltage', 0, writeable=True, gettextcallback = goodwe_inverter._v)
+        dbusservice['pvinverter'].add_path('/Ac/L1/Voltage', 0, writeable=True, gettextcallback = goodwe_inverter._v)
+        dbusservice['pvinverter'].add_path('/Ac/L1/Current', 0, writeable=True, gettextcallback = goodwe_inverter._a)
+        dbusservice['pvinverter'].add_path('/Ac/L1/Power', 0, writeable=True, gettextcallback = goodwe_inverter._w)
+        dbusservice['pvinverter'].add_path('/Ac/L1/Energy/Forward', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
+        dbusservice['pvinverter'].add_path('/Ac/L2/Voltage', 0, writeable=True, gettextcallback = goodwe_inverter._v)
+        dbusservice['pvinverter'].add_path('/Ac/L2/Current', 0, writeable=True, gettextcallback = goodwe_inverter._a)
+        dbusservice['pvinverter'].add_path('/Ac/L2/Power', 0, writeable=True, gettextcallback = goodwe_inverter._w)
+        dbusservice['pvinverter'].add_path('/Ac/L2/Energy/Forward', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
+        dbusservice['pvinverter'].add_path('/Ac/L3/Voltage', 0, writeable=True, gettextcallback = goodwe_inverter._v)
+        dbusservice['pvinverter'].add_path('/Ac/L3/Current', 0, writeable=True, gettextcallback = goodwe_inverter._a)
+        dbusservice['pvinverter'].add_path('/Ac/L3/Power', 0, writeable=True, gettextcallback = goodwe_inverter._w)
+        dbusservice['pvinverter'].add_path('/Ac/L3/Energy/Forward', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
+        # Position is required to establish on which line the inverter sits (AC OUT, In, ETC)
+        dbusservice['pvinverter'].add_path('/Position', goodwe_inverter.pv_inverter_position, writeable=True)
+        dbusservice['pvinverter'].add_path('/MaxPower', goodwe_inverter.pv_max_power, writeable=True)
+            
+        # pass dbus object to goodwe class
+        goodwe_inverter.set_dbus_service(dbusservice)
+        # add _update function 'timer'
+        # update every 5 seconds to prevent blocking by GoodWe Inverter
+        gobject.timeout_add(5000, goodwe_inverter.update_dbus_pv_inverter) # pause 5000ms before the next request
 
-        dbusservice['grid'].add_path('/Ac/L1/Energy/Forward', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
-        dbusservice['grid'].add_path('/Ac/L1/Energy/Reverse', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
-        dbusservice['grid'].add_path('/Ac/Energy/Forward', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
-        dbusservice['grid'].add_path('/Ac/Energy/Reverse', None, writeable=True, gettextcallback = goodwe_inverter._kwh)
-        dbusservice['grid'].add_path('/Ac/Power', 0, writeable=True, gettextcallback = goodwe_inverter._w)
-        dbusservice['grid'].add_path('/Ac/L1/Current', 0, writeable=True, gettextcallback = goodwe_inverter._a)
-        dbusservice['grid'].add_path('/Ac/L1/Voltage', 0, writeable=True, gettextcallback = goodwe_inverter._v)
-        dbusservice['grid'].add_path('/Ac/L1/Power', 0, writeable=True, gettextcallback = goodwe_inverter._w)
-        dbusservice['grid'].add_path('/Position', goodwe_inverter.pv_inverter_position, writeable=True)
-        
+        logging.info('Connected to dbus, and switching over to gobject.MainLoop() (= event based)')
+        mainloop = gobject.MainLoop()
+        mainloop.run()            
+    except Exception as e:
+        logging.critical('Error at %s', 'main', exc_info=e)
 
-      # pass dbus object to goodwe class
-      goodwe_inverter.set_dbus_service(dbusservice)
-      # add _update function 'timer'
-      # update every 5 seconds to prevent blocking by GoodWe Inverter
-      gobject.timeout_add(5000, goodwe_inverter.update_dbus_pv_inverter) # pause 5000ms before the next request
-
-      logging.info('Connected to dbus, and switching over to gobject.MainLoop() (= event based)')
-      mainloop = gobject.MainLoop()
-      mainloop.run()            
-  except Exception as e:
-    logging.critical('Error at %s', 'main', exc_info=e)
 if __name__ == "__main__":
-  main()
+    main()
