@@ -38,38 +38,41 @@ class VictronDbusService():
  
   # Here is the bit you need to create multiple new services - try as much as possible timplement the Victron Dbus API requirements.
   def create_dbus_service(self, base, physical, logical, id, instance, product_id, product_name, custom_name, type=None):
-      dbus_service =  VeDbusService("{}.{}.{}_id{:02d}".format(base, type, physical,  id), self._dbus_connection())
+    dbus_service = VeDbusService("{}.{}.{}_id{:02d}".format(base, type, physical, id), self._dbus_connection(), register=False)
 
-      # physical is the physical connection
-      # logical is the logical connection to align with the numbering of the console display
-      # Create the management objects, as specified in the ccgx dbus-api document
-      dbus_service.add_path('/Mgmt/ProcessName', __file__)
-      dbus_service.add_path('/Mgmt/ProcessVersion', 'Unkown version, and running on Python ' + platform.python_version())
-      dbus_service.add_path('/Mgmt/Connection', logical)
-  
-      # Create the mandatory objects, note these may need to be customised after object creation
-      # We're creating a connected object by default
-      dbus_service.add_path('/DeviceInstance', instance)
-      dbus_service.add_path('/ProductId', product_id)
-      dbus_service.add_path('/ProductName', product_name)
-      dbus_service.add_path('/CustomName', custom_name)
-      dbus_service.add_path('/FirmwareVersion', 0)
-      dbus_service.add_path('/HardwareVersion', 0)
-      dbus_service.add_path('/Connected', 1, writeable=True) # Mark devices as disconnected until they are confirmed
-  
-      dbus_service.add_path('/UpdateIndex', 0, writeable=True)
-      dbus_service.add_path('/StatusCode', 0, writeable=True)
+    # physical is the physical connection
+    # logical is the logical connection to align with the numbering of the console display
+    # Create the management objects, as specified in the ccgx dbus-api document
+    dbus_service.add_path('/Mgmt/ProcessName', __file__)
+    dbus_service.add_path('/Mgmt/ProcessVersion', 'Unknown version, and running on Python ' + platform.python_version())
+    dbus_service.add_path('/Mgmt/Connection', logical)
 
-      # Create device type specific objects
-      if type == 'temperature':
-          dbus_service.add_path('/Temperature', 0)
-          dbus_service.add_path('/Status', 0)
-          dbus_service.add_path('/TemperatureType', 0, writeable=True)
-      if type == 'humidity':
-          dbus_service.add_path('/Humidity', 0)
-          dbus_service.add_path('/Status', 0)
-  
-      return dbus_service
+    # Create the mandatory objects, note these may need to be customized after object creation
+    # We're creating a connected object by default
+    dbus_service.add_path('/DeviceInstance', instance)
+    dbus_service.add_path('/ProductId', product_id)
+    dbus_service.add_path('/ProductName', product_name)
+    dbus_service.add_path('/CustomName', custom_name)
+    dbus_service.add_path('/FirmwareVersion', 0)
+    dbus_service.add_path('/HardwareVersion', 0)
+    dbus_service.add_path('/Connected', 1, writeable=True)  # Mark devices as disconnected until they are confirmed
+
+    dbus_service.add_path('/UpdateIndex', 0, writeable=True)
+    dbus_service.add_path('/StatusCode', 0, writeable=True)
+
+    # Create device type specific objects
+    if type == 'temperature':
+        dbus_service.add_path('/Temperature', 0)
+        dbus_service.add_path('/Status', 0)
+        dbus_service.add_path('/TemperatureType', 0, writeable=True)
+    if type == 'humidity':
+        dbus_service.add_path('/Humidity', 0)
+        dbus_service.add_path('/Status', 0)
+
+    # Register the service after adding all paths
+    dbus_service.register()
+
+    return dbus_service
 
 class GoodWeEMService:
     """ GoodWe Inverter and SmartMeter class
@@ -123,6 +126,9 @@ class GoodWeEMService:
 
         logging.debug("%s /DeviceInstance = %d" % (self.custom_name, self.device_instance))
 
+        # Initialize GoodWe inverter connection
+        self.inverter = None
+
     def set_dbus_service(self, dbus_service):
         self.dbus_service = dbus_service
 
@@ -131,47 +137,86 @@ class GoodWeEMService:
         config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
         return config
 
-    async def _get_goodwe_data(self, host):
-        # ToDo: Read sensor data unit
-        inverter = await goodwe.connect(host)
-        meter_data = await inverter.read_runtime_data()
-        
-        # check for response
-        if not meter_data:
-            raise ConnectionError("No response from GoodWe EM - %s" % (host))
-        
-        return meter_data
+    async def _ping_host(self):
+        proc = await asyncio.create_subprocess_shell(
+            f"ping -c 1 -t 2 -W 2 {self.pv_host}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        return proc.returncode == 0
 
-    def refresh_meter_data(self):   
+    async def _connect_to_inverter(self):
+        if await self._ping_host():
+            try:
+                self.inverter = await goodwe.connect(self.pv_host)
+            except Exception as e:
+                logging.error("Failed to connect to GoodWe inverter: %s", e)
+                self.inverter = None
+        else:
+            logging.info("Host %s is not reachable", self.pv_host)
+            self.inverter = None
+
+    async def _get_goodwe_data(self):
+        if self.inverter is None:
+            await self._connect_to_inverter()
+
+        if self.inverter is not None:
+            try:
+                meter_data = await self.inverter.read_runtime_data()
+                return meter_data
+            except Exception as e:
+                logging.error("Failed to read data from GoodWe inverter: %s", e)
+                self.inverter = None
+
+        return {}
+
+    def refresh_meter_data(self):
         try:
-            #get data from GoodWe EM through Goodwe python library in async
-            meter_data = asyncio.run(self._get_goodwe_data(self.pv_host))       
-            
-            # ppv = for photo voltaic voltage
-            self.pv_power = meter_data.get('ppv', 0)
-            # igrid current ac on grid (not differentiated by the meter)
-            self.pv_current = meter_data.get('igrid', 0)
-            # total power equals power as GoodWe gives us the aggregatted ammount
-            self.e_total = meter_data.get('e_total', 0)
-            # total voltage on AC line (not differentiated by the meter)
-            self.pv_voltage = meter_data.get('vgrid', 0)
+            # get data from GoodWe EM through Goodwe python library in async
+            meter_data = asyncio.run(self._get_goodwe_data())
 
-            # 3-phase specific data
-            self.vgrid1 = meter_data.get('vgrid1', 0)
-            self.vgrid2 = meter_data.get('vgrid2', 0)
-            self.vgrid3 = meter_data.get('vgrid3', 0)
-            self.igrid1 = meter_data.get('igrid1', 0)
-            self.igrid2 = meter_data.get('igrid2', 0)
-            self.igrid3 = meter_data.get('igrid3', 0)
-            self.pgrid1 = meter_data.get('pgrid1', 0)
-            self.pgrid2 = meter_data.get('pgrid2', 0)
-            self.pgrid3 = meter_data.get('pgrid3', 0)
-            self.total_inverter_power = meter_data.get('total_inverter_power', 0)
-            self.work_mode = meter_data.get('work_mode', 0)
+            if not meter_data:
+                # If meter_data is empty, set all variables to 0 except e_total to keep track of total energy
+                self.pv_power = 0
+                self.pv_current = 0
+                self.pv_voltage = 0
+                self.vgrid1 = 0
+                self.vgrid2 = 0
+                self.vgrid3 = 0
+                self.igrid1 = 0
+                self.igrid2 = 0
+                self.igrid3 = 0
+                self.pgrid1 = 0
+                self.pgrid2 = 0
+                self.pgrid3 = 0
+                self.work_mode = 0  # Standby mode
+            else:
+                # ppv = for photo voltaic voltage
+                self.pv_power = meter_data.get('ppv', 0)
+                # igrid current ac on grid (not differentiated by the meter)
+                self.pv_current = meter_data.get('igrid', 0)
+                # total power equals power as GoodWe gives us the aggregated amount
+                self.e_total = meter_data.get('e_total', 0)
+                # total voltage on AC line (not differentiated by the meter)
+                self.pv_voltage = meter_data.get('vgrid', 0)
+
+                # 3-phase specific data
+                self.vgrid1 = meter_data.get('vgrid1', 0)
+                self.vgrid2 = meter_data.get('vgrid2', 0)
+                self.vgrid3 = meter_data.get('vgrid3', 0)
+                self.igrid1 = meter_data.get('igrid1', 0)
+                self.igrid2 = meter_data.get('igrid2', 0)
+                self.igrid3 = meter_data.get('igrid3', 0)
+                self.pgrid1 = meter_data.get('pgrid1', 0)
+                self.pgrid2 = meter_data.get('pgrid2', 0)
+                self.pgrid3 = meter_data.get('pgrid3', 0)
+                self.total_inverter_power = meter_data.get('total_inverter_power', 0)
+                self.work_mode = meter_data.get('work_mode', 0)
 
         except Exception as e:
             logging.critical('Error at %s', '_update', exc_info=e)
-        
+
         return True
 
     def map_work_mode_to_status_code(self, work_mode):
@@ -238,7 +283,7 @@ class GoodWeEMService:
 
 def main():
     #configure logging
-    logging.basicConfig(      format='%(asctime)s,%(msecs)d %(name)s %(levellevel)s %(message)s',
+    logging.basicConfig(      format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
                               datefmt='%Y-%m-%d %H:%M:%S',
                               level=logging.INFO,
                               handlers=[
